@@ -6,7 +6,11 @@ import 'appointments_page.dart';
 import 'add_patients_page.dart';
 
 class DoctorHomePage extends StatefulWidget {
-  const DoctorHomePage({super.key});
+     final bool hasDailySlots; // ← ADD
+  const DoctorHomePage({
+    super.key,
+    this.hasDailySlots = false, // ← ADD
+    });
 
   @override
   State<DoctorHomePage> createState() => DoctorHomePageState();
@@ -17,6 +21,7 @@ class DoctorHomePageState extends State<DoctorHomePage> {
   bool isFirstCheckedIn = false;
   int totalAppointments = 0;
   List<Map<String, dynamic>> appointments = []; // Declared to store appointments
+
 
   final GlobalKey<AppointmentsPageState> appointmentsKey =
       GlobalKey<AppointmentsPageState>();
@@ -82,18 +87,19 @@ class DoctorHomePageState extends State<DoctorHomePage> {
                             'assets/images/add-patient.png',
                             width: 20,
                             height: 20,
-                            color: Color(0xFF670E22),
+                             color: widget.hasDailySlots ? const Color(0xFF670E22) : Colors.grey, // already no const here, fine
                           ),
-                          label: const Text(
+                          label:  Text(
                             'Add Patient',
                             style: TextStyle(
                               fontFamily: 'Poppins',
                               fontWeight: FontWeight.w500,
                               fontSize: 15,
-                              color: Color(0xFF670E22),
+                              color: widget.hasDailySlots ? const Color(0xFF670E22) : Colors.grey,
                             ),
                           ),
-                          onPressed: () async {
+                          onPressed: widget.hasDailySlots
+    ? () async {
                             stopPeriodicFetch();
                             await Navigator.push(
                               context,
@@ -101,9 +107,14 @@ class DoctorHomePageState extends State<DoctorHomePage> {
                                   builder: (context) => AddPatientPage()),
                             );
                             startPeriodicFetch(); // Restart periodic fetch
-                          },
+                          } : null, // Disable button if no daily slots
+                          
                           style: OutlinedButton.styleFrom(
-                            side: const BorderSide(color: Color(0xFF670E22)),
+                           
+                            // Border color
+side: BorderSide(
+  color: widget.hasDailySlots ? const Color(0xFF670E22) : Colors.grey,
+),
                             shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.circular(40),
                             ),
@@ -112,16 +123,20 @@ class DoctorHomePageState extends State<DoctorHomePage> {
                         ),
                       ),
                     ),
-                    const SizedBox(width: 12),
-                    Flexible(
-                      flex: 1,
-                      child: SizedBox(
-                        width: double.infinity,
-                        child: BreakButton(
-                          onApiSuccess: refreshAppointments,
-                        ),
-                      ),
-                    ),
+               const SizedBox(width: 12),
+Flexible(
+  flex: 1,
+  child: SizedBox(
+    width: double.infinity,
+    child: IgnorePointer(
+      ignoring: !widget.hasDailySlots,
+      child: Opacity(
+        opacity: widget.hasDailySlots ? 1.0 : 0.4,
+        child: BreakButton(onApiSuccess: refreshAppointments),
+      ),
+    ),
+  ),
+),
                   ],
                 ),
               ),

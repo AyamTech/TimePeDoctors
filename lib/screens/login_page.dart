@@ -122,7 +122,7 @@ class _LoginScreenState extends State<LoginScreen> {
           responseData['message'] == 'OTP sent successfully.') {
         SharedPreferences prefs = await SharedPreferences.getInstance();
         await prefs.setString('phoneNumber', phone);
-        Navigator.push(
+        Navigator.pushReplacement(
           context,
           MaterialPageRoute(
             builder: (context) => OTPVerificationScreen(phoneNumber: phone),

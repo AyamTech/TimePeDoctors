@@ -31,6 +31,10 @@ class ApiConstants {
       '$baseUrl/appointment/doctor/availability/$doctorId';
   static String getActiveAppointmentsUrl(String doctorId) =>
       '$baseUrl/appointment/doctor/active/$doctorId';
+  static String getAllAppointmentsUrl(String doctorId) =>
+      '$baseUrl/appointment/doctor/todays/$doctorId';
+ static String cancelAllAppointments(String doctorId) =>
+      '$baseUrl/doctor/cancel-appointments/$doctorId';
   static String reorderAppointmentsUrl(String doctorId) =>
       '$baseUrl/appointment/reorder/$doctorId';
 static String deleteAccount() =>

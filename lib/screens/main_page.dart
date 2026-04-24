@@ -29,6 +29,7 @@ class _DoctorMainPageState extends State<DoctorMainPage> {
   bool refreshDoctorHome = false;
   String? _doctorId;
   Map<String, dynamic>? _scheduleData;
+  bool _hasDailySlots = false;
 
   // Use the public state class NotificationSettingsScreenState
   final GlobalKey<NotificationSettingsScreenState> _notificationKey =
@@ -89,6 +90,7 @@ class _DoctorMainPageState extends State<DoctorMainPage> {
       print('Schedule Response Data: $responseData');
 final Map<String, dynamic> data = responseData['data'];
 
+   final dailySlots = data['dailySlots'];
 final Map<String, dynamic> schedule =
     data['schedule'] as Map<String, dynamic>;
 
@@ -133,6 +135,7 @@ setState(() {
   _scheduleData = schedule;
   _isScheduleAvailable = isAvailable;
   _isLoading = false;
+   _hasDailySlots = dailySlots != null && (dailySlots as List).isNotEmpty;
 });
 
 
@@ -239,7 +242,7 @@ setState(() {
           : IndexedStack(
               index: _selectedIndex,
               children: [
-                DoctorHomePage(key: _homeKey),
+                 DoctorHomePage(key: _homeKey, hasDailySlots: _hasDailySlots), // Pass the daily slots info
                 _isScheduleAvailable && _doctorId != null
                     ? SchedulePage(
                         doctorId: _doctorId!,

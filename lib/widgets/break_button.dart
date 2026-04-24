@@ -152,6 +152,7 @@ class _BreakButtonState extends State<BreakButton> {
         CustomToast.show(context, "Failed to start break.", ToastType.error);
       }
     } catch (e) {
+      print("Error starting break: $e");
       CustomToast.show(context, "Something went wrong", ToastType.error);
     }
   }
@@ -218,6 +219,7 @@ class _BreakButtonState extends State<BreakButton> {
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
+        print('Doctor Availability Data: $data');
         final now = DateTime.now();
         final currentTime = DateFormat('HH:mm').format(now);
 
@@ -227,17 +229,36 @@ class _BreakButtonState extends State<BreakButton> {
           final nowTime = DateFormat('HH:mm').parse(currentTime);
           return nowTime.isAfter(startTime) && nowTime.isBefore(endTime);
         }
+        final schedule = data['data']['schedule'];
+        print('Schedule: $schedule');
 
-        final morning = data['morningSession'];
-        final evening = data['eveningSession'];
+      final sections = schedule['scheduleSections'] ?? [];
 
-        bool breakAllowed = (morning['enabled'] && isWithinSession(morning['start'], morning['end'])) ||
-            (evening['enabled'] && isWithinSession(evening['start'], evening['end']));
 
-        if (!breakAllowed) {
-          CustomToast.show(context, "Break is allowed only during working hours.", ToastType.info);
-          return;
-        }
+
+bool breakAllowed = false;
+
+for (var section in sections) {
+  final morning = section['morningSession'];
+  final evening = section['eveningSession'];
+
+  if (morning != null &&
+      morning['enabled'] == true &&
+      isWithinSession(morning['start'], morning['end'])) {
+    breakAllowed = true;
+  }
+
+  if (evening != null &&
+      evening['enabled'] == true &&
+      isWithinSession(evening['start'], evening['end'])) {
+    breakAllowed = true;
+  }
+}
+
+if (!breakAllowed) {
+  CustomToast.show(context, "Break is allowed only during working hours.", ToastType.info);
+  return;
+}
 
         // Show break options
         final List<int> breakMinutes = [15, 30, 45, 60];
@@ -283,6 +304,7 @@ class _BreakButtonState extends State<BreakButton> {
         CustomToast.show(context, "Unable to fetch schedule.", ToastType.error);
       }
     } catch (e) {
+      print("Error showing break options: $e");
       CustomToast.show(context, "Something went wrong", ToastType.error);
     }
   }

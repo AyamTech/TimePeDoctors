@@ -1736,6 +1736,10 @@ import 'package:intl/intl.dart';
 import '../services/schedule_api_service.dart';
 import 'main_page.dart';
 import '../constants/api_constants.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:jwt_decoder/jwt_decoder.dart';
 
 class SchedulePage extends StatefulWidget {
   final String doctorId;
@@ -1757,7 +1761,11 @@ class _SchedulePageState extends State<SchedulePage> with SingleTickerProviderSt
   late TabController _tabController;
   bool _isLoading = true;
 
- // Section A (Weekdays) - Morning session
+  // Whether doctor has active/pending appointments (checked on load)
+  bool _hasActiveOrPendingAppointments = false;
+  bool _isCancellingAppointments = false;
+
+  // Section A (Weekdays) - Morning session
   bool sectionA_morningSessionEnabled = true;
   String sectionA_morningStartTime = '08:00 AM';
   String sectionA_morningEndTime = '02:00 PM';
@@ -1815,6 +1823,7 @@ class _SchedulePageState extends State<SchedulePage> with SingleTickerProviderSt
     _tabController = TabController(length: 2, vsync: this);
     _apiService = ScheduleApiService(baseUrl: ApiConstants.baseUrl);
     _fetchScheduleData();
+    _checkActiveOrPendingAppointments();
   }
 
   @override
@@ -1823,185 +1832,337 @@ class _SchedulePageState extends State<SchedulePage> with SingleTickerProviderSt
     super.dispose();
   }
 
- // ============================================
-// DIAGNOSTIC VERSION - Use this to find the issue
-// ============================================
+  // ─────────────────────────────────────────────────────────────
+  // Check if doctor has any Active or Pending appointments today
+  // ─────────────────────────────────────────────────────────────
+  Future<void> _checkActiveOrPendingAppointments() async {
+    try {
+      SharedPreferences prefs = await SharedPreferences.getInstance();
+      String? token = prefs.getString('authToken');
+      if (token == null) return;
 
-Future<void> _fetchScheduleData() async {
-  print('🔵 Starting _fetchScheduleData');
-  
-  setState(() {
-    _isLoading = true;
-  });
+      final response = await http.get(
+        Uri.parse(ApiConstants.getAllAppointmentsUrl(widget.doctorId)),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+      );
 
-  try {
-    print('🔵 Calling fetchSchedule API for doctorId: ${widget.doctorId}');
-    final availability = await _apiService.fetchSchedule(widget.doctorId);
-    print('🔵 Fetched availability in schedule page: $availability');
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        final appointments = data['appointments'] as List<dynamic>? ?? [];
+
+        final hasActiveOrPending = appointments.any((item) {
+          final status = item['appointmentObj']?['status'];
+          return status == 'Active' || status == 'Pending';
+        });
+
+        setState(() {
+          _hasActiveOrPendingAppointments = hasActiveOrPending;
+        });
+      }
+    } catch (e) {
+      print('❌ Error checking appointments: $e');
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Cancel all appointments via API then proceed with save
+  // ─────────────────────────────────────────────────────────────
+  Future<void> _cancelAllAndSave() async {
+    setState(() => _isCancellingAppointments = true);
+
+    try {
+      SharedPreferences prefs = await SharedPreferences.getInstance();
+      String? token = prefs.getString('authToken');
+      if (token == null) throw Exception('No token found');
+
+      final response = await http.put(
+        Uri.parse(ApiConstants.cancelAllAppointments(widget.doctorId)),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+      );
+
+      if (response.statusCode == 200) {
+        setState(() {
+          _hasActiveOrPendingAppointments = false;
+          _isCancellingAppointments = false;
+        });
+        // Proceed with saving the schedule
+        await _saveScheduleData();
+      } else {
+        setState(() => _isCancellingAppointments = false);
+        showCustomToast(context, "Failed to cancel appointments. Please try again.", isSuccess: false);
+      }
+    } catch (e) {
+      setState(() => _isCancellingAppointments = false);
+      showCustomToast(context, "Error cancelling appointments: $e", isSuccess: false);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Show confirmation popup before saving if appointments exist
+  // ─────────────────────────────────────────────────────────────
+  Future<void> _onSavePressed() async {
+    if (_hasActiveOrPendingAppointments) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => Dialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Warning icon
+                Container(
+                  width: 64,
+                  height: 64,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF6B0D24).withOpacity(0.1),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(
+                    Icons.warning_amber_rounded,
+                    color: Color(0xFF6B0D24),
+                    size: 36,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Active Appointments Found',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    fontFamily: 'Poppins',
+                    color: Color(0xFF1A1A1A),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                const Text(
+                  'You have active or pending appointments scheduled for today. Updating your schedule will cancel all of them.\n\nDo you want to cancel all booked patients and proceed?',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontFamily: 'Poppins',
+                    color: Colors.grey,
+                    height: 1.5,
+                  ),
+                ),
+                const SizedBox(height: 24),
+                Row(
+                  children: [
+                    // Keep Appointments button
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: () => Navigator.of(context).pop(false),
+                        style: OutlinedButton.styleFrom(
+                          side: const BorderSide(color: Color(0xFF6B0D24)),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                        ),
+                        child: const Text(
+                          'Go Back',
+                          style: TextStyle(
+                            color: Color(0xFF6B0D24),
+                            fontFamily: 'Poppins',
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    // Cancel & Save button
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: () => Navigator.of(context).pop(true),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF6B0D24),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                        ),
+                        child: const Text(
+                          'Cancel & Save',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontFamily: 'Poppins',
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+
+      if (confirmed == true) {
+        await _cancelAllAndSave();
+      }
+    } else {
+      // No active/pending appointments — save directly
+      await _saveScheduleData();
+    }
+  }
+
+  // ============================================
+  // DIAGNOSTIC VERSION - Use this to find the issue
+  // ============================================
+  Future<void> _fetchScheduleData() async {
+    print('🔵 Starting _fetchScheduleData');
     
-    if (availability == null) {
-      print('⚠️ Availability is NULL');
+    setState(() {
+      _isLoading = true;
+    });
+
+    try {
+      print('🔵 Calling fetchSchedule API for doctorId: ${widget.doctorId}');
+      final availability = await _apiService.fetchSchedule(widget.doctorId);
+      print('🔵 Fetched availability in schedule page: $availability');
+      
+      if (availability == null) {
+        print('⚠️ Availability is NULL');
+        setState(() {
+          _isLoading = false;
+          showSummary = false;
+        });
+        return;
+      }
+
+      print('✅ Availability is NOT null');
+      print('🔍 Type of availability: ${availability.runtimeType}');
+      
+      final scheduleData = availability.schedule;
+      print('🔍 Schedule data: $scheduleData');
+      print('🔍 Type of schedule: ${scheduleData.runtimeType}');
+      
+      print('🔍 useMultipleSections: ${scheduleData.useMultipleSections}');
+      print('🔍 scheduleSections: ${scheduleData.scheduleSections}');
+      
+      if (scheduleData.scheduleSections != null) {
+        print('🔍 Number of sections: ${scheduleData.scheduleSections!.length}');
+        for (var i = 0; i < scheduleData.scheduleSections!.length; i++) {
+          print('🔍 Section $i: ${scheduleData.scheduleSections![i]}');
+        }
+      }
+
+      setState(() {
+        print('🟢 Entering setState block');
+        
+        if (scheduleData.useMultipleSections &&
+            scheduleData.scheduleSections != null) {
+
+          print('🟢 Using multiple sections mode');
+          final sections = scheduleData.scheduleSections!;
+
+          Map<String, dynamic>? sectionA;
+          for (var section in sections) {
+            print('🔍 Checking section: ${section['sectionName']}');
+            if (section['sectionName'] == 'A') {
+              sectionA = section;
+              print('✅ Found Section A: $sectionA');
+              break;
+            }
+          }
+
+          Map<String, dynamic>? sectionB;
+          for (var section in sections) {
+            if (section['sectionName'] == 'Saturday-Sunday') {
+              sectionB = section;
+              print('✅ Found Section B: $sectionB');
+              break;
+            }
+          }
+
+          if (sectionA != null) {
+            print('🟢 Processing Section A');
+            final m = sectionA['morningSession'];
+            final e = sectionA['eveningSession'];
+
+            if (m != null) {
+              sectionA_morningSessionEnabled = m['enabled'] ?? true;
+              sectionA_morningStartTime = m['start'] ?? '08:00 AM';
+              sectionA_morningEndTime = m['end'] ?? '02:00 PM';
+              sectionA_morningSelectedDays = List<bool>.from(
+                m['selectedDays'] ?? [false, true, true, true, true, true, false]
+              );
+            }
+
+            if (e != null) {
+              sectionA_eveningSessionEnabled = e['enabled'] ?? true;
+              sectionA_eveningStartTime = e['start'] ?? '04:00 PM';
+              sectionA_eveningEndTime = e['end'] ?? '08:00 PM';
+              sectionA_eveningSelectedDays = List<bool>.from(
+                e['selectedDays'] ?? [false, true, true, true, true, true, false]
+              );
+            }
+          }
+
+          if (sectionB != null) {
+            print('🟢 Processing Section B');
+            final m = sectionB['morningSession'];
+            final e = sectionB['eveningSession'];
+
+            if (m != null) {
+              sectionB_morningSessionEnabled = m['enabled'] ?? false;
+              sectionB_morningStartTime = m['start'] ?? '09:00 AM';
+              sectionB_morningEndTime = m['end'] ?? '01:00 PM';
+              sectionB_morningSelectedDays = List<bool>.from(
+                m['selectedDays'] ?? [true, false, false, false, false, false, true]
+              );
+            }
+
+            if (e != null) {
+              sectionB_eveningSessionEnabled = e['enabled'] ?? false;
+              sectionB_eveningStartTime = e['start'] ?? '03:00 PM';
+              sectionB_eveningEndTime = e['end'] ?? '06:00 PM';
+              sectionB_eveningSelectedDays = List<bool>.from(
+                e['selectedDays'] ?? [true, false, false, false, false, false, true]
+              );
+            }
+          }
+        } else {
+          print('🟡 Using legacy mode (not multiple sections)');
+          sectionA_morningSessionEnabled = scheduleData.morningSession.enabled;
+          sectionA_eveningSessionEnabled = scheduleData.eveningSession.enabled;
+        }
+
+        selectedDuration = scheduleData.appointmentDuration;
+        repeatEvery = scheduleData.repeatEvery;
+        repeatPeriod = scheduleData.repeatPeriod;
+        neverEnds = scheduleData.neverEnds;
+        status = scheduleData.status;
+        showSummary = true; 
+      });
+
+    } catch (e, stackTrace) {
+      print('❌ Error fetching schedule data: $e');
+      print('❌ Stack trace: $stackTrace');
+    } finally {
       setState(() {
         _isLoading = false;
+        print('🔵 Loading set to false');
       });
-      return;
     }
-
-    print('✅ Availability is NOT null');
-    print('🔍 Type of availability: ${availability.runtimeType}');
     
-    // Check if schedule exists
-    final scheduleData = availability.schedule;
-    print('🔍 Schedule data: $scheduleData');
-    print('🔍 Type of schedule: ${scheduleData.runtimeType}');
-    
-    // Check useMultipleSections
-    print('🔍 useMultipleSections: ${scheduleData.useMultipleSections}');
-    print('🔍 scheduleSections: ${scheduleData.scheduleSections}');
-    
-    if (scheduleData.scheduleSections != null) {
-      print('🔍 Number of sections: ${scheduleData.scheduleSections!.length}');
-      for (var i = 0; i < scheduleData.scheduleSections!.length; i++) {
-        print('🔍 Section $i: ${scheduleData.scheduleSections![i]}');
-      }
-    }
-
-    setState(() {
-      print('🟢 Entering setState block');
-      
-      if (scheduleData.useMultipleSections &&
-          scheduleData.scheduleSections != null) {
-
-        print('🟢 Using multiple sections mode');
-        final sections = scheduleData.scheduleSections!;
-        print('🟢 Sections list: $sections');
-
-        // Manual search for Section A
-        Map<String, dynamic>? sectionA;
-        for (var section in sections) {
-          print('🔍 Checking section: ${section['sectionName']}');
-          if (section['sectionName'] == 'A') {
-            sectionA = section;
-            print('✅ Found Section A: $sectionA');
-            break;
-          }
-        }
-
-        // Manual search for Section B
-        Map<String, dynamic>? sectionB;
-        for (var section in sections) {
-          if (section['sectionName'] == 'Saturday-Sunday') {
-            sectionB = section;
-            print('✅ Found Section B: $sectionB');
-            break;
-          }
-        }
-
-        // Process Section A
-        if (sectionA != null) {
-          print('🟢 Processing Section A');
-          final m = sectionA['morningSession'];
-          final e = sectionA['eveningSession'];
-
-          print('🔍 Section A morning: $m');
-          print('🔍 Section A evening: $e');
-
-          if (m != null) {
-            sectionA_morningSessionEnabled = m['enabled'] ?? true;
-            sectionA_morningStartTime = m['start'] ?? '08:00 AM';
-            sectionA_morningEndTime = m['end'] ?? '02:00 PM';
-            sectionA_morningSelectedDays = List<bool>.from(
-              m['selectedDays'] ?? [false, true, true, true, true, true, false]
-            );
-            print('✅ Section A morning set: $sectionA_morningStartTime - $sectionA_morningEndTime');
-          }
-
-          if (e != null) {
-            sectionA_eveningSessionEnabled = e['enabled'] ?? true;
-            sectionA_eveningStartTime = e['start'] ?? '04:00 PM';
-            sectionA_eveningEndTime = e['end'] ?? '08:00 PM';
-            sectionA_eveningSelectedDays = List<bool>.from(
-              e['selectedDays'] ?? [false, true, true, true, true, true, false]
-            );
-            print('✅ Section A evening set: $sectionA_eveningStartTime - $sectionA_eveningEndTime');
-          }
-        } else {
-          print('⚠️ Section A not found in schedule data');
-        }
-
-        // Process Section B
-        if (sectionB != null) {
-          print('🟢 Processing Section B');
-          final m = sectionB['morningSession'];
-          final e = sectionB['eveningSession'];
-
-          print('🔍 Section B morning: $m');
-          print('🔍 Section B evening: $e');
-
-          if (m != null) {
-            sectionB_morningSessionEnabled = m['enabled'] ?? false;
-            sectionB_morningStartTime = m['start'] ?? '09:00 AM';
-            sectionB_morningEndTime = m['end'] ?? '01:00 PM';
-            sectionB_morningSelectedDays = List<bool>.from(
-              m['selectedDays'] ?? [true, false, false, false, false, false, true]
-            );
-            print('✅ Section B morning set: $sectionB_morningStartTime - $sectionB_morningEndTime');
-          }
-
-          if (e != null) {
-            sectionB_eveningSessionEnabled = e['enabled'] ?? false;
-            sectionB_eveningStartTime = e['start'] ?? '03:00 PM';
-            sectionB_eveningEndTime = e['end'] ?? '06:00 PM';
-            sectionB_eveningSelectedDays = List<bool>.from(
-              e['selectedDays'] ?? [true, false, false, false, false, false, true]
-            );
-            print('✅ Section B evening set: $sectionB_eveningStartTime - $sectionB_eveningEndTime');
-          }
-        } else {
-          print('⚠️ Section B (Saturday-Sunday) not found in schedule data');
-        }
-      } else {
-        print('🟡 Using legacy mode (not multiple sections)');
-        // Legacy fallback
-        sectionA_morningSessionEnabled = scheduleData.morningSession.enabled;
-        sectionA_eveningSessionEnabled = scheduleData.eveningSession.enabled;
-      }
-
-      // Set common fields
-      selectedDuration = scheduleData.appointmentDuration;
-      repeatEvery = scheduleData.repeatEvery;
-      repeatPeriod = scheduleData.repeatPeriod;
-      neverEnds = scheduleData.neverEnds;
-      status = scheduleData.status;
-      
-      print('🟢 Common fields set');
-      print('✅ Duration: $selectedDuration');
-      print('✅ Repeat: $repeatEvery $repeatPeriod');
-      print('✅ Status: $status');
-      
-      print('🎯 FINAL STATE CHECK:');
-      print('Section A Morning: $sectionA_morningStartTime - $sectionA_morningEndTime (enabled: $sectionA_morningSessionEnabled)');
-      print('Section A Evening: $sectionA_eveningStartTime - $sectionA_eveningEndTime (enabled: $sectionA_eveningSessionEnabled)');
-      print('Section B Morning: $sectionB_morningStartTime - $sectionB_morningEndTime (enabled: $sectionB_morningSessionEnabled)');
-      print('Section B Evening: $sectionB_eveningStartTime - $sectionB_eveningEndTime (enabled: $sectionB_eveningSessionEnabled)');
-    });
-
-    print('✅✅✅ setState completed successfully');
-
-  } catch (e, stackTrace) {
-    print('❌ Error fetching schedule data: $e');
-    print('❌ Stack trace: $stackTrace');
-    //showCustomToast(context, "Failed to load schedule data", isSuccess: false);
-  } finally {
-    setState(() {
-      _isLoading = false;
-      print('🔵 Loading set to false');
-    });
+    print('🔵 _fetchScheduleData completed');
   }
-  
-  print('🔵 _fetchScheduleData completed');
-}
- Future<void> _saveScheduleData() async {
+
+  Future<void> _saveScheduleData() async {
     // Validation: Section A
     if (sectionA_morningSessionEnabled && sectionA_eveningSessionEnabled) {
       if (!_validateNoTimeOverlap(sectionA_morningEndTime, sectionA_eveningStartTime)) {
@@ -2089,7 +2250,7 @@ Future<void> _fetchScheduleData() async {
 
       if (success) {
         setState(() {
-          showSummary = true;
+          _fetchScheduleData();
         });
         showCustomToast(context, "Schedule saved successfully.", isSuccess: true);
         if (widget.showAppBar) {
@@ -2099,7 +2260,12 @@ Future<void> _fetchScheduleData() async {
         showCustomToast(context, "Failed to save schedule.", isSuccess: false);
       }
     } catch (e) {
-      showCustomToast(context, "Error saving schedule: $e", isSuccess: false);
+      String errorMessage = e.toString().replaceFirst("Exception: ", "");
+      showCustomToast(
+        context,
+        "Error saving schedule: $errorMessage",
+        isSuccess: false,
+      );
     } finally {
       setState(() {
         _isLoading = false;
@@ -2107,14 +2273,12 @@ Future<void> _fetchScheduleData() async {
     }
   }
 
-  // Validate no time overlap between sessions
- bool _validateNoTimeOverlap(String morningEnd, String eveningStart) {
+  bool _validateNoTimeOverlap(String morningEnd, String eveningStart) {
     int morningEndIndex = timeOptions.indexOf(morningEnd);
     int eveningStartIndex = timeOptions.indexOf(eveningStart);
     return eveningStartIndex > morningEndIndex;
   }
 
-  @override
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -2185,10 +2349,24 @@ Future<void> _fetchScheduleData() async {
               topRight: Radius.circular(20),
             ),
           ),
-          child: _isLoading
-              ? const Center(
-                  child: CircularProgressIndicator(
-                    color: Color(0xFF6B0D24),
+          child: _isLoading || _isCancellingAppointments
+              ? Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const CircularProgressIndicator(color: Color(0xFF6B0D24)),
+                      if (_isCancellingAppointments) ...[
+                        const SizedBox(height: 16),
+                        const Text(
+                          'Cancelling appointments...',
+                          style: TextStyle(
+                            fontFamily: 'Poppins',
+                            color: Colors.grey,
+                            fontSize: 14,
+                          ),
+                        ),
+                      ],
+                    ],
                   ),
                 )
               : SingleChildScrollView(
@@ -2209,11 +2387,45 @@ Future<void> _fetchScheduleData() async {
                                 fontFamily: 'Poppins'
                               ),
                             ),
-                            IconButton(
-                              icon: const Icon(Icons.refresh),
-                              onPressed: _fetchScheduleData,
-                              color: const Color(0xFF6B0D24),
-                            )
+                            Row(
+                              children: [
+                                // Warning badge if active/pending appointments exist
+                                if (_hasActiveOrPendingAppointments)
+                                  Container(
+                                    margin: const EdgeInsets.only(right: 8),
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                    decoration: BoxDecoration(
+                                      color: Colors.orange.shade50,
+                                      borderRadius: BorderRadius.circular(20),
+                                      border: Border.all(color: Colors.orange.shade300),
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Icon(Icons.warning_amber_rounded,
+                                            size: 14, color: Colors.orange.shade700),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          'Active appointments',
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            fontFamily: 'Poppins',
+                                            color: Colors.orange.shade700,
+                                            fontWeight: FontWeight.w500,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                IconButton(
+                                  icon: const Icon(Icons.refresh),
+                                  onPressed: () {
+                                    _fetchScheduleData();
+                                    _checkActiveOrPendingAppointments();
+                                  },
+                                  color: const Color(0xFF6B0D24),
+                                ),
+                              ],
+                            ),
                           ],
                         ),
                         const SizedBox(height: 20),
@@ -2221,7 +2433,7 @@ Future<void> _fetchScheduleData() async {
                         
                         // Section A - Weekdays
                         const Text(
-                          'Section A – Weekdays',
+                          'Regular Days',
                           style: TextStyle(
                             fontSize: 16,
                             fontWeight: FontWeight.bold,
@@ -2232,44 +2444,32 @@ Future<void> _fetchScheduleData() async {
                         const SizedBox(height: 16),
                         
                         _buildSessionCardWithDays(
-  'Morning Session',
-  sectionA_morningSessionEnabled,
-  sectionA_morningStartTime,
-  sectionA_morningEndTime,
-  sectionA_morningSelectedDays,
-  (value) {
-    setState(() => sectionA_morningSessionEnabled = value);
-  },
-  (index) {
-    setState(() {
-      sectionA_morningSelectedDays[index] = !sectionA_morningSelectedDays[index];
-    });
-  },
-  'A', // ADD THIS LINE
-),
+                          'Morning Session',
+                          sectionA_morningSessionEnabled,
+                          sectionA_morningStartTime,
+                          sectionA_morningEndTime,
+                          sectionA_morningSelectedDays,
+                          (value) => setState(() => sectionA_morningSessionEnabled = value),
+                          (index) => setState(() => sectionA_morningSelectedDays[index] = !sectionA_morningSelectedDays[index]),
+                          'A',
+                        ),
                         const SizedBox(height: 16),
                         
-                       _buildSessionCardWithDays(
-  'Evening Session',
-  sectionA_eveningSessionEnabled,
-  sectionA_eveningStartTime,
-  sectionA_eveningEndTime,
-  sectionA_eveningSelectedDays,
-  (value) {
-    setState(() => sectionA_eveningSessionEnabled = value);
-  },
-  (index) {
-    setState(() {
-      sectionA_eveningSelectedDays[index] = !sectionA_eveningSelectedDays[index];
-    });
-  },
-  'A', // ADD THIS LINE
-),
+                        _buildSessionCardWithDays(
+                          'Evening Session',
+                          sectionA_eveningSessionEnabled,
+                          sectionA_eveningStartTime,
+                          sectionA_eveningEndTime,
+                          sectionA_eveningSelectedDays,
+                          (value) => setState(() => sectionA_eveningSessionEnabled = value),
+                          (index) => setState(() => sectionA_eveningSelectedDays[index] = !sectionA_eveningSelectedDays[index]),
+                          'A',
+                        ),
                         const SizedBox(height: 24),
                         
                         // Section B - Saturday-Sunday
                         const Text(
-                          'Section B – Saturday-Sunday',
+                          'Other Days',
                           style: TextStyle(
                             fontSize: 16,
                             fontWeight: FontWeight.bold,
@@ -2280,39 +2480,27 @@ Future<void> _fetchScheduleData() async {
                         const SizedBox(height: 16),
                         
                         _buildSessionCardWithDays(
-  'Morning Session',
-  sectionB_morningSessionEnabled,
-  sectionB_morningStartTime,
-  sectionB_morningEndTime,
-  sectionB_morningSelectedDays,
-  (value) {
-    setState(() => sectionB_morningSessionEnabled = value);
-  },
-  (index) {
-    setState(() {
-      sectionB_morningSelectedDays[index] = !sectionB_morningSelectedDays[index];
-    });
-  },
-  'B', // ADD THIS LINE
-),
+                          'Morning Session',
+                          sectionB_morningSessionEnabled,
+                          sectionB_morningStartTime,
+                          sectionB_morningEndTime,
+                          sectionB_morningSelectedDays,
+                          (value) => setState(() => sectionB_morningSessionEnabled = value),
+                          (index) => setState(() => sectionB_morningSelectedDays[index] = !sectionB_morningSelectedDays[index]),
+                          'B',
+                        ),
                         const SizedBox(height: 16),
                         
                         _buildSessionCardWithDays(
-  'Evening Session',
-  sectionB_eveningSessionEnabled,
-  sectionB_eveningStartTime,
-  sectionB_eveningEndTime,
-  sectionB_eveningSelectedDays,
-  (value) {
-    setState(() => sectionB_eveningSessionEnabled = value);
-  },
-  (index) {
-    setState(() {
-      sectionB_eveningSelectedDays[index] = !sectionB_eveningSelectedDays[index];
-    });
-  },
-  'B', // ADD THIS LINE
-),
+                          'Evening Session',
+                          sectionB_eveningSessionEnabled,
+                          sectionB_eveningStartTime,
+                          sectionB_eveningEndTime,
+                          sectionB_eveningSelectedDays,
+                          (value) => setState(() => sectionB_eveningSessionEnabled = value),
+                          (index) => setState(() => sectionB_eveningSelectedDays[index] = !sectionB_eveningSelectedDays[index]),
+                          'B',
+                        ),
                         const SizedBox(height: 24),
                         
                         _buildCustomRecurrenceCard(),
@@ -2329,282 +2517,182 @@ Future<void> _fetchScheduleData() async {
     );
   }
 
-  // Widget _buildSummaryCard() {
-  //   return Container(
-  //     margin: const EdgeInsets.only(bottom: 16),
-  //     padding: const EdgeInsets.all(20),
-  //     decoration: BoxDecoration(
-  //       color: Colors.white,
-  //       borderRadius: BorderRadius.circular(16),
-  //       boxShadow: [
-  //         BoxShadow(
-  //           color: Colors.black.withOpacity(0.05),
-  //           blurRadius: 10,
-  //           offset: const Offset(0, 2),
-  //         ),
-  //       ],
-  //     ),
-  //     child: Column(
-  //       crossAxisAlignment: CrossAxisAlignment.start,
-  //       children: [
-  //         const Text(
-  //           'Summary',
-  //           style: TextStyle(
-  //             fontSize: 16,
-  //             color: Colors.grey,
-  //             fontFamily: 'Poppins',
-  //             fontWeight: FontWeight.bold
-  //           ),
-  //         ),
-  //         const SizedBox(height: 12),
-          
-  //         // Morning session summary
-  //         if (sectionA_morningSessionEnabled) ...[
-  //           Row(
-  //             children: [
-  //               const Icon(Icons.wb_sunny, size: 20, color: Color(0xFF6B0D24)),
-  //               const SizedBox(width: 12),
-  //               Expanded(
-  //                 child: Column(
-  //                   crossAxisAlignment: CrossAxisAlignment.start,
-  //                   children: [
-  //                     Text(
-  //                       'Morning: $sectionA_morningStartTime - $sectionA_morningEndTime',
-  //                       style: const TextStyle(
-  //                         fontSize: 14,
-  //                         fontWeight: FontWeight.bold,
-  //                         fontFamily: 'Poppins',
-  //                       ),
-  //                     ),
-  //                     const SizedBox(height: 4),
-  //                     _buildDaySummary(sectionA_morningSelectedDays),
-  //                   ],
-  //                 ),
-  //               ),
-  //             ],
-  //           ),
-  //           if (sectionA_eveningSessionEnabled) const SizedBox(height: 16),
-  //         ],
-          
-  //         // Evening session summary
-  //         if (sectionA_eveningSessionEnabled) ...[
-  //           Row(
-  //             children: [
-  //               const Icon(Icons.nightlight_round, size: 20, color: Color(0xFF6B0D24)),
-  //               const SizedBox(width: 12),
-  //               Expanded(
-  //                 child: Column(
-  //                   crossAxisAlignment: CrossAxisAlignment.start,
-  //                   children: [
-  //                     Text(
-  //                       'Evening: $sectionA_eveningStartTime - $sectionA_eveningEndTime',
-  //                       style: const TextStyle(
-  //                         fontSize: 14,
-  //                         fontWeight: FontWeight.bold,
-  //                         fontFamily: 'Poppins',
-  //                       ),
-  //                     ),
-  //                     const SizedBox(height: 4),
-  //                     _buildDaySummary(sectionA_eveningSelectedDays),
-  //                   ],
-  //                 ),
-  //               ),
-  //             ],
-  //           ),
-  //         ],
-  //       ],
-  //     ),
-  //   );
-  // }
-Widget _buildSummaryCard() {
-  return Container(
-    margin: const EdgeInsets.only(bottom: 16),
-    padding: const EdgeInsets.all(20),
-    decoration: BoxDecoration(
-      color: Colors.white,
-      borderRadius: BorderRadius.circular(16),
-      boxShadow: [
-        BoxShadow(
-          color: Colors.black.withOpacity(0.05),
-          blurRadius: 10,
-          offset: const Offset(0, 2),
-        ),
-      ],
-    ),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          'Summary',
-          style: TextStyle(
-            fontSize: 16,
-            color: Colors.grey,
-            fontFamily: 'Poppins',
-            fontWeight: FontWeight.bold
+  Widget _buildSummaryCard() {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 10,
+            offset: const Offset(0, 2),
           ),
-        ),
-        const SizedBox(height: 12),
-        
-        // Section A Header
-        if (sectionA_morningSessionEnabled || sectionA_eveningSessionEnabled) ...[
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
           const Text(
-            'Section A – Weekdays',
+            'Summary',
             style: TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.bold,
+              fontSize: 16,
+              color: Colors.grey,
               fontFamily: 'Poppins',
-              color: Color(0xFF6B0D24),
+              fontWeight: FontWeight.bold
             ),
           ),
-          const SizedBox(height: 8),
-        ],
-        
-        // Section A Morning session summary
-        if (sectionA_morningSessionEnabled) ...[
-          Row(
-            children: [
-              const Icon(Icons.wb_sunny, size: 20, color: Color(0xFF6B0D24)),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Morning: $sectionA_morningStartTime - $sectionA_morningEndTime',
-                      style: const TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.bold,
-                        fontFamily: 'Poppins',
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    _buildDaySummary(sectionA_morningSelectedDays),
-                  ],
-                ),
+          const SizedBox(height: 12),
+          
+          if (sectionA_morningSessionEnabled || sectionA_eveningSessionEnabled) ...[
+            const Text(
+              'Regular Days',
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.bold,
+                fontFamily: 'Poppins',
+                color: Color(0xFF6B0D24),
               ),
-            ],
-          ),
-          if (sectionA_eveningSessionEnabled) const SizedBox(height: 16),
-        ],
-        
-        // Section A Evening session summary
-        if (sectionA_eveningSessionEnabled) ...[
-          Row(
-            children: [
-              const Icon(Icons.nightlight_round, size: 20, color: Color(0xFF6B0D24)),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Evening: $sectionA_eveningStartTime - $sectionA_eveningEndTime',
-                      style: const TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.bold,
-                        fontFamily: 'Poppins',
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    _buildDaySummary(sectionA_eveningSelectedDays),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ],
-        
-        // Section B Header
-        if (sectionB_morningSessionEnabled || sectionB_eveningSessionEnabled) ...[
-          if (sectionA_morningSessionEnabled || sectionA_eveningSessionEnabled) 
-            const SizedBox(height: 20),
-          const Text(
-            'Section B – Saturday-Sunday',
-            style: TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.bold,
-              fontFamily: 'Poppins',
-              color: Color(0xFF6B0D24),
             ),
-          ),
-          const SizedBox(height: 8),
-        ],
-        
-        // Section B Morning session summary
-        if (sectionB_morningSessionEnabled) ...[
-          Row(
-            children: [
-              const Icon(Icons.wb_sunny, size: 20, color: Color(0xFF6B0D24)),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Morning: $sectionB_morningStartTime - $sectionB_morningEndTime',
-                      style: const TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.bold,
-                        fontFamily: 'Poppins',
+            const SizedBox(height: 8),
+          ],
+          
+          if (sectionA_morningSessionEnabled) ...[
+            Row(
+              children: [
+                const Icon(Icons.wb_sunny, size: 20, color: Color(0xFF6B0D24)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Morning: $sectionA_morningStartTime - $sectionA_morningEndTime',
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold,
+                          fontFamily: 'Poppins',
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 4),
-                    _buildDaySummary(sectionB_morningSelectedDays),
-                  ],
+                      const SizedBox(height: 4),
+                      _buildDaySummary(sectionA_morningSelectedDays),
+                    ],
+                  ),
                 ),
-              ),
-            ],
-          ),
-          if (sectionB_eveningSessionEnabled) const SizedBox(height: 16),
-        ],
-        
-        // Section B Evening session summary
-        if (sectionB_eveningSessionEnabled) ...[
-          Row(
-            children: [
-              const Icon(Icons.nightlight_round, size: 20, color: Color(0xFF6B0D24)),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Evening: $sectionB_eveningStartTime - $sectionB_eveningEndTime',
-                      style: const TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.bold,
-                        fontFamily: 'Poppins',
+              ],
+            ),
+            if (sectionA_eveningSessionEnabled) const SizedBox(height: 16),
+          ],
+          
+          if (sectionA_eveningSessionEnabled) ...[
+            Row(
+              children: [
+                const Icon(Icons.nightlight_round, size: 20, color: Color(0xFF6B0D24)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Evening: $sectionA_eveningStartTime - $sectionA_eveningEndTime',
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold,
+                          fontFamily: 'Poppins',
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 4),
-                    _buildDaySummary(sectionB_eveningSelectedDays),
-                  ],
+                      const SizedBox(height: 4),
+                      _buildDaySummary(sectionA_eveningSelectedDays),
+                    ],
+                  ),
                 ),
+              ],
+            ),
+          ],
+          
+          if (sectionB_morningSessionEnabled || sectionB_eveningSessionEnabled) ...[
+            if (sectionA_morningSessionEnabled || sectionA_eveningSessionEnabled) 
+              const SizedBox(height: 20),
+            const Text(
+              'Other Days',
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.bold,
+                fontFamily: 'Poppins',
+                color: Color(0xFF6B0D24),
               ),
-            ],
-          ),
+            ),
+            const SizedBox(height: 8),
+          ],
+          
+          if (sectionB_morningSessionEnabled) ...[
+            Row(
+              children: [
+                const Icon(Icons.wb_sunny, size: 20, color: Color(0xFF6B0D24)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Morning: $sectionB_morningStartTime - $sectionB_morningEndTime',
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold,
+                          fontFamily: 'Poppins',
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      _buildDaySummary(sectionB_morningSelectedDays),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            if (sectionB_eveningSessionEnabled) const SizedBox(height: 16),
+          ],
+          
+          if (sectionB_eveningSessionEnabled) ...[
+            Row(
+              children: [
+                const Icon(Icons.nightlight_round, size: 20, color: Color(0xFF6B0D24)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Evening: $sectionB_eveningStartTime - $sectionB_eveningEndTime',
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold,
+                          fontFamily: 'Poppins',
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      _buildDaySummary(sectionB_eveningSelectedDays),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ],
         ],
-      ],
-    ),
-  );
-}
+      ),
+    );
+  }
+
   Widget _buildDaySummary(List<bool> selectedDays) {
     final days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
     final selectedDayNames = <String>[];
-    
     for (int i = 0; i < 7; i++) {
-      if (selectedDays[i]) {
-        selectedDayNames.add(days[i]);
-      }
+      if (selectedDays[i]) selectedDayNames.add(days[i]);
     }
-    
     return Text(
       selectedDayNames.join(', '),
-      style: const TextStyle(
-        fontSize: 12,
-        color: Colors.grey,
-        fontFamily: 'Poppins',
-      ),
+      style: const TextStyle(fontSize: 12, color: Colors.grey, fontFamily: 'Poppins'),
     );
   }
 
@@ -2616,7 +2704,7 @@ Widget _buildSummaryCard() {
     List<bool> selectedDays,
     ValueChanged<bool> onEnabledChanged,
     Function(int) onDayToggled,
-     String sectionIdentifier,
+    String sectionIdentifier,
   ) {
     return Container(
       padding: const EdgeInsets.all(20),
@@ -2640,9 +2728,7 @@ Widget _buildSummaryCard() {
               Row(
                 children: [
                   Icon(
-                    title == 'Morning Session' 
-                        ? Icons.wb_sunny 
-                        : Icons.nightlight_round,
+                    title == 'Morning Session' ? Icons.wb_sunny : Icons.nightlight_round,
                     color: const Color(0xFF6B0D24),
                     size: 20,
                   ),
@@ -2670,44 +2756,29 @@ Widget _buildSummaryCard() {
           
           if (enabled) ...[
             const Divider(height: 30),
-            
-            // Time selection
             Row(
               children: [
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text(
-                        'Start Time',
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w500,
-                          fontFamily: 'Poppins',
-                        ),
-                      ),
+                      const Text('Start Time', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, fontFamily: 'Poppins')),
                       const SizedBox(height: 8),
-                 _buildTimeSelector(
-  startTime,
-  (newTime) {
-    setState(() {
-      if (sectionIdentifier == 'A') {
-        if (title == 'Morning Session') {
-          sectionA_morningStartTime = newTime;
-        } else {
-          sectionA_eveningStartTime = newTime;
-        }
-      } else { // Section B
-        if (title == 'Morning Session') {
-          sectionB_morningStartTime = newTime;
-        } else {
-          sectionB_eveningStartTime = newTime;
-        }
-      }
-    });
-  },
-  timeOptions,
-),
+                      _buildTimeSelector(
+                        startTime,
+                        (newTime) {
+                          setState(() {
+                            if (sectionIdentifier == 'A') {
+                              if (title == 'Morning Session') sectionA_morningStartTime = newTime;
+                              else sectionA_eveningStartTime = newTime;
+                            } else {
+                              if (title == 'Morning Session') sectionB_morningStartTime = newTime;
+                              else sectionB_eveningStartTime = newTime;
+                            }
+                          });
+                        },
+                        timeOptions,
+                      ),
                     ],
                   ),
                 ),
@@ -2716,55 +2787,30 @@ Widget _buildSummaryCard() {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text(
-                        'End Time',
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w500,
-                          fontFamily: 'Poppins',
-                        ),
-                      ),
+                      const Text('End Time', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, fontFamily: 'Poppins')),
                       const SizedBox(height: 8),
-                     _buildTimeSelector(
-  endTime,
-  (newTime) {
-    setState(() {
-      if (sectionIdentifier == 'A') {
-        if (title == 'Morning Session') {
-          sectionA_morningEndTime = newTime;
-        } else {
-          sectionA_eveningEndTime = newTime;
-        }
-      } else { // Section B
-        if (title == 'Morning Session') {
-          sectionB_morningEndTime = newTime;
-        } else {
-          sectionB_eveningEndTime = newTime;
-        }
-      }
-    });
-  },
-  timeOptions.where((time) =>
-    timeOptions.indexOf(time) > timeOptions.indexOf(startTime)
-  ).toList(),
-),
+                      _buildTimeSelector(
+                        endTime,
+                        (newTime) {
+                          setState(() {
+                            if (sectionIdentifier == 'A') {
+                              if (title == 'Morning Session') sectionA_morningEndTime = newTime;
+                              else sectionA_eveningEndTime = newTime;
+                            } else {
+                              if (title == 'Morning Session') sectionB_morningEndTime = newTime;
+                              else sectionB_eveningEndTime = newTime;
+                            }
+                          });
+                        },
+                        timeOptions.where((time) => timeOptions.indexOf(time) > timeOptions.indexOf(startTime)).toList(),
+                      ),
                     ],
                   ),
                 ),
               ],
             ),
-            
             const SizedBox(height: 20),
-            
-            // Days selection
-            const Text(
-              'Available Days',
-              style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
-                fontFamily: 'Poppins',
-              ),
-            ),
+            const Text('Available Days', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, fontFamily: 'Poppins')),
             const SizedBox(height: 12),
             _buildDaySelector(selectedDays, onDayToggled),
           ],
@@ -2773,11 +2819,7 @@ Widget _buildSummaryCard() {
     );
   }
 
-  Widget _buildTimeSelector(
-    String time, 
-    ValueChanged<String> onChanged, 
-    List<String> options
-  ) {
+  Widget _buildTimeSelector(String time, ValueChanged<String> onChanged, List<String> options) {
     String validTime = time;
     if (time.isEmpty && options.isNotEmpty) {
       validTime = options[0];
@@ -2787,21 +2829,13 @@ Widget _buildSummaryCard() {
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      decoration: BoxDecoration(
-        color: Colors.grey[100],
-        borderRadius: BorderRadius.circular(10),
-      ),
+      decoration: BoxDecoration(color: Colors.grey[100], borderRadius: BorderRadius.circular(10)),
       child: DropdownButtonHideUnderline(
         child: DropdownButton<String>(
           value: validTime,
           isExpanded: true,
           icon: Icon(Icons.keyboard_arrow_down, color: Colors.grey[600]),
-          style: const TextStyle(
-            fontSize: 14,
-            fontWeight: FontWeight.bold,
-            fontFamily: 'Poppins',
-            color: Colors.black,
-          ),
+          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, fontFamily: 'Poppins', color: Colors.black),
           items: options.map((String value) {
             return DropdownMenuItem<String>(
               value: value,
@@ -2815,47 +2849,31 @@ Widget _buildSummaryCard() {
             );
           }).toList(),
           onChanged: (newValue) {
-            if (newValue != null) {
-              onChanged(newValue);
-            }
+            if (newValue != null) onChanged(newValue);
           },
         ),
       ),
     );
   }
- Widget _buildNumberSelector() {
+
+  Widget _buildNumberSelector() {
     return Container(
-      decoration: BoxDecoration(
-        color: Colors.grey[100],
-        borderRadius: BorderRadius.circular(12),
-      ),
+      decoration: BoxDecoration(color: Colors.grey[100], borderRadius: BorderRadius.circular(12)),
       child: Row(
         children: [
           IconButton(
             icon: Icon(Icons.remove, color: Colors.grey[600]),
             onPressed: () {
               final current = int.parse(repeatEvery);
-              if (current > 1) {
-                setState(() {
-                  repeatEvery = (current - 1).toString().padLeft(2, '0');
-                });
-              }
+              if (current > 1) setState(() => repeatEvery = (current - 1).toString().padLeft(2, '0'));
             },
           ),
-          Text(
-            repeatEvery,
-            style: const TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
-                fontFamily: 'Poppins'),
-          ),
+          Text(repeatEvery, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, fontFamily: 'Poppins')),
           IconButton(
             icon: Icon(Icons.add, color: Colors.grey[600]),
             onPressed: () {
               final current = int.parse(repeatEvery);
-              setState(() {
-                repeatEvery = (current + 1).toString().padLeft(2, '0');
-              });
+              setState(() => repeatEvery = (current + 1).toString().padLeft(2, '0'));
             },
           ),
         ],
@@ -2864,34 +2882,23 @@ Widget _buildSummaryCard() {
   }
 
   Widget _buildPeriodSelector() {
-    // Define the available options
     final List<String> periodOptions = ['Week', 'Month', 'Year'];
-
     return Expanded(
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        decoration: BoxDecoration(
-          color: Colors.grey[100],
-          borderRadius: BorderRadius.circular(12),
-        ),
+        decoration: BoxDecoration(color: Colors.grey[100], borderRadius: BorderRadius.circular(12)),
         child: DropdownButtonHideUnderline(
           child: DropdownButton<String>(
             value: repeatPeriod,
             isExpanded: true,
             icon: Icon(Icons.keyboard_arrow_down, color: Colors.grey[600]),
-            style: const TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.w500,
-              fontFamily: 'Poppins',
-              color: Colors.black,
-            ),
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500, fontFamily: 'Poppins', color: Colors.black),
             items: periodOptions.map((String value) {
               return DropdownMenuItem<String>(
                 value: value,
                 child: Row(
                   children: [
-                    Icon(Icons.calendar_today,
-                        color: const Color(0xFF6B0D24), size: 24),
+                    const Icon(Icons.calendar_today, color: Color(0xFF6B0D24), size: 24),
                     const SizedBox(width: 12),
                     Text(value),
                   ],
@@ -2899,18 +2906,14 @@ Widget _buildSummaryCard() {
               );
             }).toList(),
             onChanged: (String? newValue) {
-              if (newValue != null) {
-                setState(() {
-                  repeatPeriod = newValue;
-                });
-              }
+              if (newValue != null) setState(() => repeatPeriod = newValue);
             },
           ),
         ),
       ),
     );
   }
-  
+
   Widget _buildDaySelector(List<bool> selectedDays, Function(int) onDayToggled) {
     final days = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
     return Row(
@@ -2922,9 +2925,7 @@ Widget _buildSummaryCard() {
             width: 40,
             height: 40,
             decoration: BoxDecoration(
-              color: selectedDays[index] 
-                  ? const Color(0xFF6B0D24) 
-                  : Colors.grey[100],
+              color: selectedDays[index] ? const Color(0xFF6B0D24) : Colors.grey[100],
               borderRadius: BorderRadius.circular(12),
             ),
             child: Center(
@@ -2949,33 +2950,14 @@ Widget _buildSummaryCard() {
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 10,
-            offset: const Offset(0, 2),
-          ),
-        ],
+        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 10, offset: const Offset(0, 2))],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'Custom Recurrence',
-            style: TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.bold,
-              fontFamily: 'Poppins'
-            ),
-          ),
+          const Text('Custom Recurrence', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, fontFamily: 'Poppins')),
           const Divider(height: 30),
-           const Text(
-            'Repeat Every',
-            style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
-                fontFamily: 'Poppins'),
-          ),
+          const Text('Repeat Every', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, fontFamily: 'Poppins')),
           const SizedBox(height: 16),
           Row(
             children: [
@@ -2984,18 +2966,7 @@ Widget _buildSummaryCard() {
               _buildPeriodSelector(),
             ],
           ),
-          Row(
-            children: [
-              const Text(
-                'Ends',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w500,
-                  fontFamily: 'Poppins'
-                ),
-              ),
-            ],
-          ),
+          Row(children: [const Text('Ends', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, fontFamily: 'Poppins'))]),
           const SizedBox(height: 16),
           _buildEndOptions(),
         ],
@@ -3006,43 +2977,11 @@ Widget _buildSummaryCard() {
   Widget _buildEndOptions() {
     return Row(
       children: [
-        Radio(
-          value: true,
-          groupValue: neverEnds,
-          onChanged: (value) {
-            setState(() {
-              neverEnds = value as bool;
-            });
-          },
-          activeColor: const Color(0xFF6B0D24),
-        ),
-        const Text(
-          'Never',
-          style: TextStyle(
-            fontSize: 14,
-            fontWeight: FontWeight.w500,
-            fontFamily: 'Poppins'
-          ),
-        ),
+        Radio(value: true, groupValue: neverEnds, onChanged: (value) => setState(() => neverEnds = value as bool), activeColor: const Color(0xFF6B0D24)),
+        const Text('Never', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, fontFamily: 'Poppins')),
         const SizedBox(width: 24),
-        Radio(
-          value: false,
-          groupValue: neverEnds,
-          onChanged: (value) {
-            setState(() {
-              neverEnds = value as bool;
-            });
-          },
-          activeColor: const Color(0xFF6B0D24),
-        ),
-        const Text(
-          'On',
-          style: TextStyle(
-            fontSize: 14,
-            fontWeight: FontWeight.w500,
-            fontFamily: 'Poppins'
-          ),
-        ),
+        Radio(value: false, groupValue: neverEnds, onChanged: (value) => setState(() => neverEnds = value as bool), activeColor: const Color(0xFF6B0D24)),
+        const Text('On', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, fontFamily: 'Poppins')),
         const SizedBox(width: 8),
         Expanded(
           child: Container(
@@ -3054,37 +2993,23 @@ Widget _buildSummaryCard() {
             child: InkWell(
               onTap: neverEnds ? null : () async {
                 final currentYear = DateTime.now().year;
-                final maxYear = currentYear + 10;
                 DateTime? pickedDate = await showDatePicker(
                   context: context,
                   initialDate: _selectedDate,
                   firstDate: DateTime.now(),
-                  lastDate: DateTime(maxYear),
+                  lastDate: DateTime(currentYear + 10),
                 );
-                if (pickedDate != null) {
-                  setState(() {
-                    _selectedDate = pickedDate;
-                  });
-                }
+                if (pickedDate != null) setState(() => _selectedDate = pickedDate);
               },
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
                     DateFormat('dd-MM-yy').format(_selectedDate),
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
-                      color: neverEnds ? Colors.grey : Colors.black,
-                      fontFamily: 'Poppins',
-                    ),
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: neverEnds ? Colors.grey : Colors.black, fontFamily: 'Poppins'),
                   ),
                   const SizedBox(width: 6),
-                  Icon(
-                    Icons.calendar_today,
-                    color: neverEnds ? Colors.grey : const Color(0xFF6B0D24),
-                    size: 16,
-                  ),
+                  Icon(Icons.calendar_today, color: neverEnds ? Colors.grey : const Color(0xFF6B0D24), size: 16),
                 ],
               ),
             ),
@@ -3101,33 +3026,14 @@ Widget _buildSummaryCard() {
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 10,
-            offset: const Offset(0, 2),
-          ),
-        ],
+        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 10, offset: const Offset(0, 2))],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'Appointment Duration',
-            style: TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.bold,
-              fontFamily: 'Poppins',
-            ),
-          ),
+          const Text('Appointment Duration', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, fontFamily: 'Poppins')),
           const Divider(height: 30),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: durationOptions
-                .map((duration) => _buildDurationButton(duration))
-                .toList(),
-          ),
+          Wrap(spacing: 8, runSpacing: 8, children: durationOptions.map((d) => _buildDurationButton(d)).toList()),
         ],
       ),
     );
@@ -3136,28 +3042,17 @@ Widget _buildSummaryCard() {
   Widget _buildDurationButton(String duration) {
     final isSelected = selectedDuration == duration;
     return GestureDetector(
-      onTap: () {
-        setState(() {
-          selectedDuration = duration;
-        });
-      },
+      onTap: () => setState(() => selectedDuration = duration),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         decoration: BoxDecoration(
           color: isSelected ? const Color(0xFF6B0D24) : Colors.white,
           borderRadius: BorderRadius.circular(24),
-          border: Border.all(
-            color: isSelected ? const Color(0xFF6B0D24) : Colors.grey[300]!,
-          ),
+          border: Border.all(color: isSelected ? const Color(0xFF6B0D24) : Colors.grey[300]!),
         ),
         child: Text(
           duration,
-          style: TextStyle(
-            color: isSelected ? Colors.white : const Color(0xFF6B0D24),
-            fontWeight: FontWeight.w500,
-            fontSize: 14,
-            fontFamily: 'Poppins'
-          ),
+          style: TextStyle(color: isSelected ? Colors.white : const Color(0xFF6B0D24), fontWeight: FontWeight.w500, fontSize: 14, fontFamily: 'Poppins'),
         ),
       ),
     );
@@ -3168,21 +3063,15 @@ Widget _buildSummaryCard() {
       width: double.infinity,
       height: 46,
       child: ElevatedButton(
-        onPressed: _saveScheduleData,
+        // ← Now calls _onSavePressed instead of _saveScheduleData directly
+        onPressed: _onSavePressed,
         style: ElevatedButton.styleFrom(
           backgroundColor: const Color(0xFF6B0D24),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(27),
-          ),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(27)),
         ),
         child: const Text(
           'Save',
-          style: TextStyle(
-            fontSize: 18,
-            fontWeight: FontWeight.bold,
-            color: Colors.white,
-            fontFamily: 'Poppins'
-          ),
+          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white, fontFamily: 'Poppins'),
         ),
       ),
     );
@@ -3194,26 +3083,28 @@ Widget _buildSummaryCard() {
 
     OverlayEntry overlayEntry = OverlayEntry(
       builder: (context) => Positioned(
-        bottom: 50,
-        left: MediaQuery.of(context).size.width * 0.1,
-        right: MediaQuery.of(context).size.width * 0.1,
+        bottom: 80,
+        left: 16,
+        right: 16,
         child: Material(
           color: Colors.transparent,
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            decoration: BoxDecoration(
-              color: Colors.black87,
-              borderRadius: BorderRadius.circular(30),
-            ),
+            decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(30)),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.center,
-              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 Icon(iconData, color: iconColor),
                 const SizedBox(width: 8),
-                Text(
-                  message,
-                  style: const TextStyle(color: Colors.white, fontSize: 16),
+                Expanded(
+                  child: Text(
+                    message,
+                    style: const TextStyle(color: Colors.white, fontSize: 14),
+                    textAlign: TextAlign.center,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
               ],
             ),
@@ -3223,10 +3114,6 @@ Widget _buildSummaryCard() {
     );
 
     Overlay.of(context).insert(overlayEntry);
-
-    Future.delayed(const Duration(seconds: 2), () {
-      overlayEntry.remove();
-    });
+    Future.delayed(const Duration(seconds: 2), () => overlayEntry.remove());
   }
 }
-

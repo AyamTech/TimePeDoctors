@@ -1,3 +1,4 @@
+
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -32,13 +33,15 @@ class AppointmentsPageState extends State<AppointmentsPage> with RouteAware {
   late SocketService socketService;
   bool socketConnected = false;
 
+  // ScrollController to jump to first non-completed appointment
+  final ScrollController _scrollController = ScrollController();
 
   @override
   void initState() {
     super.initState();
-  connectSocket();
-  setupFirebaseNotificationListener();
-  fetchAppointments();
+    connectSocket();
+    setupFirebaseNotificationListener();
+    fetchAppointments();
   }
 
   @override
@@ -50,6 +53,7 @@ class AppointmentsPageState extends State<AppointmentsPage> with RouteAware {
   @override
   void dispose() {
     _timer?.cancel();
+    _scrollController.dispose();
     routeObserver.unsubscribe(this);
     super.dispose();
   }
@@ -74,55 +78,41 @@ class AppointmentsPageState extends State<AppointmentsPage> with RouteAware {
     stopPeriodicFetch();
   }
 
-//function to connect to socket server
+  // function to connect to socket server
   void connectSocket() async {
-  SharedPreferences prefs = await SharedPreferences.getInstance();
-  String? token = prefs.getString('authToken');
-  if (token == null) return;
+    SharedPreferences prefs = await SharedPreferences.getInstance();
+    String? token = prefs.getString('authToken');
+    if (token == null) return;
 
-  final decoded = JwtDecoder.decode(token);
-  final doctorId = decoded['id'];
+    final decoded = JwtDecoder.decode(token);
+    final doctorId = decoded['id'];
 
-  socketService = SocketService();
-  socketService.connect(
-    baseUrl:  'https://app.ayamtechs.com',
-    token: token,
-    clientId: doctorId,
-    role: 'doctor',
-    doctorId: doctorId, // pass it in here
-  );
+    socketService = SocketService();
+    socketService.connect(
+      baseUrl: 'https://app.ayamtechs.com',
+      token: token,
+      clientId: doctorId,
+      role: 'doctor',
+      doctorId: doctorId,
+    );
 
-  // Listen for real-time events
-  // socketService.on('queue_update', (data) {
-  //   print("📡 Queue update received → $data");
-  //   fetchAppointments();
-  // });
-
-socketService.on('queue_update', (data) {
-    setState(() {
-      appointments = data['appointments'].map((a) => {
-        'id': a['_id'],
-        'name': a['patient']['name'],
-        'checkIn': a['checkIn'],
-        'time': a['startTime'],
-        'status': a['status'],
-      }).toList();
+    socketService.on('queue_update', (data) {
+      setState(() {
+        appointments = data['appointments'].map((a) => {
+              'id': a['_id'],
+              'name': a['patient']['name'],
+              'checkIn': a['checkIn'],
+              'time': a['startTime'],
+              'status': a['status'],
+            }).toList();
+      });
     });
-  });
 
-  // socketService.on('patient_moved', (data) {
-  //   ScaffoldMessenger.of(context).showSnackBar(
-  //     SnackBar(content: Text("${data['patientName']} is ${data['distanceMeters']}m away")),
-  //   );
-  // });
-  // socketService.on('distance_update', (data) {
-  //   print("🚗 Patient distance update → $data");
-  // });
+    socketService.on('queue_count', (data) {
+      print("👥 Queue count update → ${data['appointmentCount']}");
+    });
+  }
 
-  socketService.on('queue_count', (data) {
-    print("👥 Queue count update → ${data['appointmentCount']}");
-  });
-}
   void setupFirebaseNotificationListener() {
     if (kIsWeb) return;
     FirebaseMessaging.onMessage.listen((RemoteMessage message) {
@@ -165,6 +155,29 @@ socketService.on('queue_update', (data) {
     }
   }
 
+  /// Scrolls the list so the first Active or Pending appointment is at the top.
+  /// Completed appointments remain accessible by scrolling up.
+  void _scrollToFirstNonCompleted() {
+    final firstNonCompleted = appointments
+        .indexWhere((a) => a['status'] != 'Completed');
+
+    if (firstNonCompleted <= 0 || !_scrollController.hasClients) return;
+
+    // Each card is roughly 80px tall (ListTile ~72px + margin 12px)
+    const double estimatedItemHeight = 84.0;
+    final double offset = firstNonCompleted * estimatedItemHeight;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          offset.clamp(0.0, _scrollController.position.maxScrollExtent),
+          duration: Duration(milliseconds: 400),
+          curve: Curves.easeInOut,
+        );
+      }
+    });
+  }
+
   Future<void> fetchAppointments() async {
     try {
       SharedPreferences prefs = await SharedPreferences.getInstance();
@@ -175,12 +188,13 @@ socketService.on('queue_update', (data) {
       String doctorId = decodedToken['id'];
 
       final response = await http.get(
-        Uri.parse(ApiConstants.getActiveAppointmentsUrl(doctorId)),
+        Uri.parse(ApiConstants.getAllAppointmentsUrl(doctorId)),
         headers: {
           'Content-Type': 'application/json',
           'Authorization': 'Bearer $token',
         },
       );
+
       if (response.statusCode == 200) {
         Map<String, dynamic> responseData = json.decode(response.body);
         if (responseData.containsKey('message') &&
@@ -194,12 +208,14 @@ socketService.on('queue_update', (data) {
           });
           return;
         }
+
         List<dynamic> data = responseData['appointments'] ?? [];
-        List<Map<String, dynamic>> filtered = data
-            .where((item) => item['appointmentObj']?['status'] != 'Completed')
-            .map((item) {
+
+        // Include ALL appointments (including Completed)
+        List<Map<String, dynamic>> filtered = data.map((item) {
           var appointment = item['appointmentObj'];
           var patient = appointment['patient'];
+
           // Safely handle patient being null or empty
           if (patient == null || patient.isEmpty) {
             return {
@@ -211,10 +227,12 @@ socketService.on('queue_update', (data) {
               'checkIn': appointment['checkIn'],
               'isEmergency': false,
               'status': appointment['status'],
+              'isPast': checkIfPast(appointment['startTime']),
             };
           }
+
           int? emergencyDuration =
-                  int.tryParse(appointment['emergencyDuration']?.toString() ?? '0');
+              int.tryParse(appointment['emergencyDuration']?.toString() ?? '0');
           bool isEmergency = emergencyDuration != null && emergencyDuration > 0;
 
           return {
@@ -229,20 +247,10 @@ socketService.on('queue_update', (data) {
             'isPast': checkIfPast(appointment['startTime']),
           };
         }).toList();
-        DateFormat format = DateFormat("hh:mm a");
-        filtered.sort((a, b) {
-          if (a['status'] == 'Active' && b['status'] != 'Active') return -1;
-          if (a['status'] != 'Active' && b['status'] == 'Active') return 1;
-          try {
-            DateTime timeA = format.parse(a['time']);
-            DateTime timeB = format.parse(b['time']);
-            return timeA.compareTo(timeB);
-          } catch (e) {
-            return 0;
-          }
-        });
+
         bool isFirstCheckedIn =
             filtered.isNotEmpty && filtered[0]['checkIn'] == true;
+
         setState(() {
           isLoading = false;
           appointments = filtered;
@@ -252,6 +260,9 @@ socketService.on('queue_update', (data) {
               totalAppointments, isFirstCheckedIn, appointments);
           startPeriodicFetch();
         });
+
+        // After state is set, scroll to first non-completed appointment
+        _scrollToFirstNonCompleted();
       } else {
         throw Exception('Failed to load appointments');
       }
@@ -326,19 +337,21 @@ socketService.on('queue_update', (data) {
                 : Stack(
                     children: [
                       ReorderableListView.builder(
+                        scrollController: _scrollController,
                         buildDefaultDragHandles: false,
                         padding: const EdgeInsets.symmetric(vertical: 8),
                         itemCount: appointments.length,
                         onReorder: (oldIndex, newIndex) {
                           final fromItem = appointments[oldIndex];
 
+                          // Prevent reordering Active, Completed, or past appointments
                           if (fromItem['status'] == 'Active' ||
+                              fromItem['status'] == 'Completed' ||
                               fromItem['isPast'] == true ||
                               (newIndex < appointments.length &&
-                                  (appointments[newIndex]['status'] ==
-                                          'Active' ||
-                                      appointments[newIndex]['isPast'] ==
-                                          true))) {
+                                  (appointments[newIndex]['status'] == 'Active' ||
+                                      appointments[newIndex]['status'] == 'Completed' ||
+                                      appointments[newIndex]['isPast'] == true))) {
                             return;
                           }
                           setState(() {
@@ -355,18 +368,24 @@ socketService.on('queue_update', (data) {
                           final appointment = appointments[index];
                           final status = statuses[index];
                           final isActive = appointment['status'] == 'Active';
+                          final isCompleted = appointment['status'] == 'Completed';
 
                           return Container(
-                            key: ValueKey('$index'),
+                            key: ValueKey('${appointment['id']}_$index'),
                             margin: const EdgeInsets.symmetric(
                                 horizontal: 4, vertical: 6),
                             decoration: BoxDecoration(
-                              color: Colors.white,
+                              // Grey out completed appointments
+                              color: isCompleted
+                                  ? Colors.grey.shade100
+                                  : Colors.white,
                               borderRadius: BorderRadius.circular(12),
                               border: Border.all(
                                 color: isActive
                                     ? Colors.green
-                                    : Colors.grey.shade300,
+                                    : isCompleted
+                                        ? Colors.grey.shade300
+                                        : Colors.grey.shade300,
                                 width: 2,
                               ),
                               boxShadow: isActive
@@ -388,7 +407,9 @@ socketService.on('queue_update', (data) {
                                 radius: 25,
                                 backgroundImage: AssetImage(
                                     'assets/images/patient_icon.png'),
-                                backgroundColor: Colors.grey.shade200,
+                                backgroundColor: isCompleted
+                                    ? Colors.grey.shade300
+                                    : Colors.grey.shade200,
                               ),
                               title: Row(
                                 children: [
@@ -396,8 +417,13 @@ socketService.on('queue_update', (data) {
                                     child: Text(
                                       appointment['name']!,
                                       style: TextStyle(
-                                          fontWeight: FontWeight.bold,
-                                          fontSize: 16),
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 16,
+                                        // Dim text for completed
+                                        color: isCompleted
+                                            ? Colors.grey.shade500
+                                            : Colors.black,
+                                      ),
                                     ),
                                   ),
                                   if (appointment['isEmergency'] == true)
@@ -416,12 +442,34 @@ socketService.on('queue_update', (data) {
                                             fontWeight: FontWeight.bold),
                                       ),
                                     ),
+                                  if (isCompleted) ...[
+                                    SizedBox(width: 6),
+                                    Container(
+                                      padding: EdgeInsets.symmetric(
+                                          horizontal: 6, vertical: 2),
+                                      decoration: BoxDecoration(
+                                          color: Colors.grey.shade400,
+                                          borderRadius:
+                                              BorderRadius.circular(4)),
+                                      child: Text(
+                                        'Completed',
+                                        style: TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 10,
+                                            fontWeight: FontWeight.bold),
+                                      ),
+                                    ),
+                                  ],
                                 ],
                               ),
                               subtitle: Text(
                                 '${appointment['symptom']} (${appointment['time']})',
                                 style: TextStyle(
-                                    color: Colors.grey.shade600, fontSize: 14),
+                                  color: isCompleted
+                                      ? Colors.grey.shade400
+                                      : Colors.grey.shade600,
+                                  fontSize: 14,
+                                ),
                               ),
                               trailing: Row(
                                 mainAxisSize: MainAxisSize.min,
@@ -432,9 +480,13 @@ socketService.on('queue_update', (data) {
                                         : 'assets/images/location-not-check.png',
                                     width: 24,
                                     height: 24,
+                                    // Dim the icon for completed
+                                    color: isCompleted ? Colors.grey.shade400 : null,
                                   ),
                                   SizedBox(width: 8),
+                                  // Only show drag handle for Pending (not Active, Completed, or past)
                                   appointment['status'] != 'Active' &&
+                                          appointment['status'] != 'Completed' &&
                                           appointment['isPast'] != true
                                       ? ReorderableDragStartListener(
                                           index: index,
