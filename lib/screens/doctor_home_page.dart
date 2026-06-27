@@ -182,7 +182,7 @@ Flexible(
                   onTotalAppointmentsFetched: updateTotalAppointments,
                 ),
               ),
-              if (totalAppointments > 0)
+              if (appointments.any((a) => a['status'] == 'Active' || a['status'] == 'Pending'))
                 NextButton(
                   totalAppointments: totalAppointments,
                   onApiSuccess: refreshAppointments,

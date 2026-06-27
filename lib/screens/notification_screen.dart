@@ -137,6 +137,34 @@ class NotificationSettingsScreenState
     _fetchNotificationSettings();
   }
 
+  Widget buildDisabledNotificationTile(String title) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Expanded(
+            child: Text(
+              title,
+              style: const TextStyle(
+                fontSize: 13,
+                fontFamily: 'Poppins',
+                fontWeight: FontWeight.w400,
+                color: Colors.grey,
+              ),
+            ),
+          ),
+          Switch(
+            value: false,
+            onChanged: null,
+            inactiveThumbColor: Colors.grey.shade400,
+            inactiveTrackColor: Colors.grey.shade300,
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget buildNotificationTile(
       String title, String settingKey, bool value, ValueChanged<bool> onChanged) {
     return Padding(
@@ -214,13 +242,8 @@ class NotificationSettingsScreenState
                                 notifyResume = val;
                               });
                             }),
-                            buildNotificationTile(
-                                'Notify when appointments are going to end',
-                                'notifyEnd', notifyEnd, (val) {
-                              setState(() {
-                                notifyEnd = val;
-                              });
-                            }),
+                            buildDisabledNotificationTile(
+                                'Notify when appointments are going to end'),
                             buildNotificationTile(
                                 'Notify when first appointment is ready',
                                 'notifyFirstReady', notifyFirstReady, (val) {
