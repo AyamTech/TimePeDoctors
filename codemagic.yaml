@@ -5,14 +5,17 @@ workflows:
     instance_type: linux_x2
     environment:
       groups:
-        # Create this group in Codemagic UI (Teams > Environment variables)
-        # with: ENV_FILE_CONTENT (contents of assets/.env)
-        #       GOOGLE_SERVICES_JSON_BASE64 (base64 of android/app/google-services.json)
+        # Create these groups in Codemagic UI (App settings > Environment variables)
+        # android_config:
+        #   ENV_FILE_CONTENT              contents of assets/.env
+        #   GOOGLE_SERVICES_JSON_BASE64   base64 of android/app/google-services.json
         - android_config
-      android_signing:
-        # Name of the keystore reference created in Codemagic UI
-        # (App settings > Code signing identities > Android keystores)
-        - timepe_keystore
+        # android_keystore:
+        #   CM_KEYSTORE            base64 of the release .jks keystore file
+        #   CM_KEYSTORE_PASSWORD   keystore password (plain text)
+        #   CM_KEY_ALIAS           key alias (plain text)
+        #   CM_KEY_PASSWORD        key password (plain text)
+        - android_keystore
       flutter: stable
     cache:
       cache_paths:
@@ -24,6 +27,11 @@ workflows:
       - name: Set up google-services.json
         script: |
           echo "$GOOGLE_SERVICES_JSON_BASE64" | base64 --decode > android/app/google-services.json
+      - name: Set up Android keystore
+        script: |
+          KEYSTORE_PATH="$CM_BUILD_DIR/keystore.jks"
+          echo "$CM_KEYSTORE" | base64 --decode > "$KEYSTORE_PATH"
+          echo "CM_KEYSTORE_PATH=$KEYSTORE_PATH" >> $CM_ENV
       - name: Get Flutter packages
         script: flutter packages pub get
       - name: Build AAB and APK
