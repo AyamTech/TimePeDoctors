@@ -27,11 +27,7 @@ windows/
 .env
 assets/.env
 
-ios/
-
 flutter_logs.txt
-
-pubspec.lock
 
 timepedoctor.jks
 
@@ -73,27 +69,14 @@ build/
 .pub-cache/
 .symlinks/
 
-# Flutter generated files
-ios/Flutter/Generated.xcconfig
-ios/Flutter/App.framework
-ios/Flutter/Flutter.framework
-ios/Flutter/Flutter.podspec
-ios/Runner.xcworkspace/
-ios/Pods/
-ios/.symlinks/
-ios/Runner/
-
-# # Firebase (if used)
-# ios/GoogleService-Info.plist
-# android/app/google-services.json
+# Firebase (secrets, injected at build time by CI)
+ios/Runner/GoogleService-Info.plist
 
 # VS Code
 .vscode/
 
 # IntelliJ
 *.iml
-android/
-"ios/Runner/"
 
 # Flutter plugin tracking files
 .flutter-plugins

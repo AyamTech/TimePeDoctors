@@ -1,0 +1,93 @@
+plugins {
+    id "com.android.application"
+    id "kotlin-android"
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file('key.properties')
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
+android {
+    namespace = "com.queue.timepedoctors"
+    compileSdk = flutter.compileSdkVersion
+    ndkVersion = "27.0.12077973"
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+        coreLibraryDesugaringEnabled true
+    }
+
+    kotlinOptions {
+        // Align Kotlin target with Java version
+        jvmTarget = JavaVersion.VERSION_17.toString()
+    }
+
+    buildFeatures {
+        viewBinding true
+    }
+
+    defaultConfig {
+        applicationId = "com.queue.timepedoctors"
+        minSdk = flutter.minSdkVersion
+        targetSdk = flutter.targetSdkVersion
+        versionCode = 202603061520  // Updated to match pubspec.yaml version
+        versionName = "202603061520"
+    }
+
+    signingConfigs {
+        release {
+            // Local dev: values come from key.properties (gitignored).
+            // CI (Codemagic): falls back to CM_* env vars injected by android_signing.
+            def storeFilePath = keystoreProperties['storeFile'] ?: System.getenv('CM_KEYSTORE_PATH')
+            if (storeFilePath) {
+                storeFile file(storeFilePath)
+            }
+            storePassword keystoreProperties['storePassword'] ?: System.getenv('CM_KEYSTORE_PASSWORD')
+            keyAlias keystoreProperties['keyAlias'] ?: System.getenv('CM_KEY_ALIAS')
+            keyPassword keystoreProperties['keyPassword'] ?: System.getenv('CM_KEY_PASSWORD')
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.release  
+        }
+    }
+
+    // Add this block to suppress the warnings
+    tasks.withType(JavaCompile) {
+        options.compilerArgs << '-Xlint:-options'
+    }
+
+    // Optional: Specify Java toolchain
+    java {
+        toolchain {
+            languageVersion.set(JavaLanguageVersion.of(17))
+        }
+    }
+}
+
+// 👇 Suppress Java obsolete option warnings
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs << "-Xlint:-options"
+}
+
+flutter {
+    source = "../.."
+}
+
+dependencies {
+    implementation "androidx.core:core-ktx:1.12.0"  // Updated to latest version
+    implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk8"  // Explicit Kotlin stdlib
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'
+}
+
+// Apply the Google Services plugin for Firebase
+apply plugin: 'com.google.gms.google-services'
