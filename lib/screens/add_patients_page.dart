@@ -538,7 +538,7 @@ class _AddPatientPageState extends State<AddPatientPage> {
     );
   }
 
-   Widget _buildDurationButton(int min) {
+ Widget _buildDurationButton(int min) {
   bool noSlotsAvailable = _availableSlots.isEmpty;
 
   return OutlinedButton(
@@ -564,31 +564,6 @@ class _AddPatientPageState extends State<AddPatientPage> {
     ),
   );
 }
-
-  Widget _buildDurationButton(int min) {
-    return OutlinedButton(
-      onPressed: () => _updateDurationButton(min),
-      style: OutlinedButton.styleFrom(
-        backgroundColor:
-            _selectedemergencyDuration == min ? Color(0xFF6B0D24) : null,
-        side: BorderSide(
-          color: Color(0xFF6B0D24),
-        ),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(20),
-        ),
-      ),
-      child: Text(
-        "$min Minutes",
-        style: TextStyle(
-          color: _selectedemergencyDuration == min
-              ? Colors.white
-              : Color(0xFF6B0D24),
-        ),
-      ),
-    );
-  }
-
   Widget _buildTextField({
     required String icon,
     required String hintText,
