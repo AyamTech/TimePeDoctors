@@ -14,7 +14,7 @@ workflows:
         #   CM_KEY_ALIAS           key alias (plain text)
         #   CM_KEY_PASSWORD        key password (plain text)
         - android_keystore
-      flutter: stable
+      flutter: 3.29.3
     cache:
       cache_paths:
         - $HOME/.pub-cache
