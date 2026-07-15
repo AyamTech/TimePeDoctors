@@ -19,6 +19,20 @@ workflows:
       cache_paths:
         - $HOME/.pub-cache
     scripts:
+    - name: Verify build environment and fonts
+      script: |
+        echo "=== Flutter Version ==="
+        flutter --version
+        echo "=== Dart Version ==="
+        dart --version
+        echo "=== Font Files ==="
+        ls -lah assets/fonts/
+        echo "=== Git Commit ==="
+        git rev-parse HEAD
+        echo "=== Pubspec Lock Hash ==="
+        shasum pubspec.lock || true
+
+    scripts:
       - name: Set up assets/.env
         script: |
           echo "$ENV_FILE_CONTENT" > assets/.env
